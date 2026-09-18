@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "남은 시간",
+    "slug": "deadline-gauge",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.deadlinegauge"
+    },
+    "android": {
+      "package": "com.example.deadlinegauge"
+    }
+  }
+}
