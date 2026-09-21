@@ -1,16 +1,30 @@
 {
   "expo": {
-    "name": "남은 시간",
-    "slug": "deadline-gauge",
+    "name": "모래시계",
+    "slug": "hourglass",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.example.deadlinegauge"
+      "bundleIdentifier": "com.example.hourglass",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "캘린더 일정과 다이어리에 사진을 첨부하기 위해 사진 보관함을 사용합니다."
+      }
     },
     "android": {
-      "package": "com.example.deadlinegauge"
-    }
+      "package": "com.example.hourglass",
+      "permissions": ["READ_MEDIA_IMAGES"]
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "캘린더 일정과 다이어리에 사진을 첨부하기 위해 사진 보관함을 사용합니다.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ]
+    ]
   }
 }

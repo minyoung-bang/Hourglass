@@ -1,169 +1,139 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable,
-  SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View,
-} from 'react-native';
+import { Alert, FlatList, Image, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import * as ImagePicker from 'expo-image-picker';
 
-const STORAGE_KEY = 'deadline-gauge.categories.v1';
-const COLORS = ['#E84C4C', '#FF8A3D', '#F4C542', '#4DBA78', '#4B8FE2', '#7B61D1', '#E069A8', '#343A40'];
-
-const id = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const STORE = 'hourglass.data.v1';
+const PREVIOUS_STORE = 'deadline-gauge.data.v2';
+const OLD_STORE = 'deadline-gauge.categories.v1';
+const COLORS = ['#EF6262', '#F6924D', '#EFBF45', '#55B887', '#5497E8', '#8468D8', '#DF70A7', '#4C535D'];
+const CHARACTERS = ['🏃', '🐶', '🐱', '🚀', '🐰', '🚴'];
+const EMOJIS = ['✨', '🌿', '📚', '☕', '🎂', '💪', '❤️', '🌈', '🐶', '🏃'];
+const WEEK = ['일', '월', '화', '수', '목', '금', '토'];
+const uid = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const pad = (n) => String(n).padStart(2, '0');
+const keyOf = (value) => { const d = new Date(value); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const fromKey = (key, hour = 12) => { const [y, m, d] = key.split('-').map(Number); return new Date(y, m - 1, d, hour); };
 const clamp = (n) => Math.min(Math.max(n, 0), 1);
-const progress = (todo, now) => 1 - clamp((now - new Date(todo.createdAt)) / (new Date(todo.dueDate) - new Date(todo.createdAt)));
+const gaugeValue = (todo, now) => { const start = +new Date(todo.createdAt); const end = +new Date(todo.dueDate); return end <= start ? 0 : 1 - clamp((+now - start) / (end - start)); };
 const remaining = (todo, now) => {
   if (todo.done) return '완료';
-  const seconds = (new Date(todo.dueDate) - now) / 1000;
-  if (seconds <= 0) return '기한 지남';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${Math.max(minutes, 1)}분 남음`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}시간 남음`;
-  return `${Math.floor(hours / 24)}일 남음`;
+  const min = Math.floor((new Date(todo.dueDate) - now) / 60000);
+  if (min <= 0) return '기한 지남';
+  if (min < 60) return `${Math.max(min, 1)}분 남음`;
+  if (min < 1440) return `${Math.floor(min / 60)}시간 남음`;
+  return `${Math.floor(min / 1440)}일 남음`;
 };
-const dueLabel = (value) => new Intl.DateTimeFormat('ko-KR', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+const dueText = (date) => new Intl.DateTimeFormat('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(date));
+const REPEATS = [{ id: 'none', label: '반복 없음' }, { id: 'daily', label: '매일' }, { id: 'weekly', label: '매주' }, { id: 'monthly', label: '매월' }, { id: 'custom', label: '지정 요일' }];
+const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
+const advanceDueDate = (todo, today) => {
+  const next = new Date(todo.dueDate);
+  const wantedDay = todo.repeatDay || next.getDate();
+  do {
+    if (todo.repeat === 'daily') next.setDate(next.getDate() + 1);
+    else if (todo.repeat === 'weekly') next.setDate(next.getDate() + 7);
+    else if (todo.repeat === 'monthly') {
+      const candidate = new Date(next.getFullYear(), next.getMonth() + 1, 1, next.getHours(), next.getMinutes(), 0, 0);
+      const last = new Date(candidate.getFullYear(), candidate.getMonth() + 1, 0).getDate();
+      candidate.setDate(Math.min(wantedDay, last)); next.setTime(candidate.getTime());
+    } else if (todo.repeat === 'custom') {
+      const days = todo.customDays?.length ? todo.customDays : [next.getDay()];
+      do { next.setDate(next.getDate() + 1); } while (!days.includes(next.getDay()));
+    } else return null;
+  } while (keyOf(next) < keyOf(today));
+  return next;
+};
 
-function Gauge({ value, color, done = false }) {
-  return (
-    <View style={[styles.gaugeTrack, { backgroundColor: `${color}22` }]}>
-      <View style={[styles.gaugeFill, { width: `${Math.max(value * 100, 2)}%`, backgroundColor: done ? '#32A66B' : color }]} />
-    </View>
-  );
+function Gauge({ todo, color, now }) {
+  const value = todo.done ? 1 : gaugeValue(todo, now);
+  return <View style={s.gaugeWrap}><View style={[s.gauge, { backgroundColor: `${color}28` }]}><View style={[s.gaugeFill, { width: `${value * 100}%`, backgroundColor: todo.done ? '#43AA78' : color }]} /></View>{!todo.done && <Text style={[s.runner, { left: `${value * 100}%` }]}>{todo.character || '🏃'}</Text>}</View>;
 }
 
-function Sheet({ visible, title, onClose, children }) {
-  return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <View style={styles.sheet}>
-          <View style={styles.sheetHandle} />
-          <View style={styles.sheetHeader}>
-            <Text style={styles.sheetTitle}>{title}</Text>
-            <Pressable onPress={onClose} hitSlop={12}><Text style={styles.close}>×</Text></Pressable>
-          </View>
-          {children}
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
-  );
+function Sheet({ visible, title, onClose, children, tall }) {
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView style={s.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}><Pressable style={StyleSheet.absoluteFill} onPress={onClose} /><View style={[s.sheet, tall && s.tall]}><View style={s.handle} /><View style={s.sheetHead}><Text style={s.sheetTitle}>{title}</Text><Pressable onPress={onClose}><Text style={s.close}>×</Text></Pressable></View>{children}</View></KeyboardAvoidingView></Modal>;
 }
 
 function CategorySheet({ visible, onClose, onAdd }) {
-  const [name, setName] = useState('');
-  const [color, setColor] = useState(COLORS[0]);
+  const [name, setName] = useState(''); const [color, setColor] = useState(COLORS[0]);
   useEffect(() => { if (visible) { setName(''); setColor(COLORS[0]); } }, [visible]);
-  const submit = () => {
-    if (!name.trim()) return;
-    onAdd({ id: id(), name: name.trim(), color, todos: [] });
-    onClose();
-  };
-  return (
-    <Sheet visible={visible} title="새 카테고리" onClose={onClose}>
-      <Text style={styles.label}>카테고리 이름</Text>
-      <TextInput value={name} onChangeText={setName} placeholder="예: 과제" style={styles.input} autoFocus maxLength={24} />
-      <Text style={styles.label}>색상</Text>
-      <View style={styles.palette}>
-        {COLORS.map((item) => (
-          <Pressable key={item} onPress={() => setColor(item)} style={[styles.swatch, { backgroundColor: item }, color === item && styles.swatchSelected]}>
-            {color === item && <Text style={styles.check}>✓</Text>}
-          </Pressable>
-        ))}
-      </View>
-      <Pressable disabled={!name.trim()} onPress={submit} style={[styles.primaryButton, { backgroundColor: color }, !name.trim() && styles.disabled]}>
-        <Text style={styles.primaryButtonText}>카테고리 추가</Text>
-      </Pressable>
-    </Sheet>
-  );
+  const submit = () => { if (!name.trim()) return; onAdd({ id: uid(), name: name.trim(), color, todos: [] }); onClose(); };
+  return <Sheet visible={visible} title="새 카테고리" onClose={onClose}><Text style={s.label}>카테고리 이름</Text><TextInput value={name} onChangeText={setName} placeholder="예: 과제" style={s.input} autoFocus maxLength={24} /><Text style={s.label}>카테고리 색상</Text><View style={s.colors}>{COLORS.map(x => <Pressable key={x} onPress={() => setColor(x)} style={[s.swatch, { backgroundColor: x }, color === x && s.swatchOn]}>{color === x && <Text style={s.check}>✓</Text>}</Pressable>)}</View><Pressable disabled={!name.trim()} onPress={submit} style={[s.primary, { backgroundColor: color }, !name.trim() && s.disabled]}><Text style={s.primaryText}>카테고리 추가</Text></Pressable></Sheet>;
 }
 
 function TodoSheet({ visible, category, onClose, onAdd }) {
-  const [title, setTitle] = useState('');
-  const [due, setDue] = useState(new Date(Date.now() + 86400000));
-  const [pickerMode, setPickerMode] = useState(null);
-  useEffect(() => { if (visible) { setTitle(''); setDue(new Date(Date.now() + 86400000)); setPickerMode(null); } }, [visible]);
+  const [title, setTitle] = useState(''); const [due, setDue] = useState(new Date(Date.now() + 86400000)); const [mode, setMode] = useState(null); const [character, setCharacter] = useState('🏃');
+  const [repeat, setRepeat] = useState('none'); const [customDays, setCustomDays] = useState([]);
+  useEffect(() => { if (visible) { setTitle(''); setDue(new Date(Date.now() + 86400000)); setMode(null); setCharacter('🏃'); setRepeat('none'); setCustomDays([]); } }, [visible]);
   if (!category) return null;
-  const submit = () => {
-    if (!title.trim() || due <= new Date()) return;
-    onAdd(category.id, { id: id(), title: title.trim(), createdAt: new Date().toISOString(), dueDate: due.toISOString(), done: false });
-    onClose();
-  };
-  return (
-    <Sheet visible={visible} title={`${category.name}에 할 일 추가`} onClose={onClose}>
-      <Text style={styles.label}>할 일 이름</Text>
-      <TextInput value={title} onChangeText={setTitle} placeholder="예: 수학 과제 제출" style={styles.input} autoFocus maxLength={50} />
-      <Text style={styles.label}>기한</Text>
-      <View style={styles.dateButtons}>
-        <Pressable style={styles.dateButton} onPress={() => setPickerMode('date')}><Text>📅  {due.toLocaleDateString('ko-KR')}</Text></Pressable>
-        <Pressable style={styles.dateButton} onPress={() => setPickerMode('time')}><Text>🕐  {due.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</Text></Pressable>
-      </View>
-      {pickerMode && <DateTimePicker value={due} mode={pickerMode} minimumDate={new Date()} onChange={(_, value) => { if (value) setDue(value); if (Platform.OS === 'android') setPickerMode(null); }} />}
-      <Text style={styles.hint}>게이지는 지금부터 마감까지의 경과 시간을 보여줘요.</Text>
-      <Pressable disabled={!title.trim() || due <= new Date()} onPress={submit} style={[styles.primaryButton, { backgroundColor: category.color }, (!title.trim() || due <= new Date()) && styles.disabled]}>
-        <Text style={styles.primaryButtonText}>할 일 추가</Text>
-      </Pressable>
-    </Sheet>
-  );
+  const submit = () => { if (!title.trim() || due <= new Date() || (repeat === 'custom' && !customDays.length)) return; onAdd(category.id, { id: uid(), title: title.trim(), character, repeat, customDays, repeatDay: due.getDate(), createdAt: new Date().toISOString(), dueDate: due.toISOString(), done: false }); onClose(); };
+  const changeDue = (_, value) => { if (value) setDue(value); if (Platform.OS === 'android') setMode(null); };
+  const invalid = !title.trim() || due <= new Date() || (repeat === 'custom' && !customDays.length);
+  return <Sheet visible={visible} title={`${category.name}에 할 일 추가`} onClose={onClose} tall><ScrollView keyboardShouldPersistTaps="handled"><Text style={s.label}>할 일 이름</Text><TextInput value={title} onChangeText={setTitle} placeholder="예: 월세 내기" style={s.input} autoFocus maxLength={50} /><Text style={s.label}>게이지 캐릭터</Text><View style={s.choices}>{CHARACTERS.map(x => <Pressable key={x} onPress={() => setCharacter(x)} style={[s.choice, character === x && { borderColor: category.color, backgroundColor: `${category.color}18` }]}><Text style={s.emoji}>{x}</Text></Pressable>)}</View><Text style={s.label}>반복</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.repeatRow}>{REPEATS.map(x => <Pressable key={x.id} onPress={() => setRepeat(x.id)} style={[s.repeatChip, repeat === x.id && { backgroundColor: category.color, borderColor: category.color }]}><Text style={[s.repeatText, repeat === x.id && s.repeatTextOn]}>{x.label}</Text></Pressable>)}</ScrollView>{repeat === 'custom' && <View style={s.dayChoices}>{DAY_NAMES.map((name, day) => <Pressable key={name} onPress={() => setCustomDays(days => days.includes(day) ? days.filter(x => x !== day) : [...days, day])} style={[s.dayChoice, customDays.includes(day) && { backgroundColor: category.color, borderColor: category.color }]}><Text style={[s.dayChoiceText, customDays.includes(day) && s.repeatTextOn]}>{name}</Text></Pressable>)}</View>}<Text style={s.label}>첫 기한</Text>{Platform.OS === 'ios' ? <View style={s.dateRow}><View style={s.dateField}><Text style={s.dateFieldLabel}>날짜</Text><DateTimePicker value={due} mode="date" display="compact" minimumDate={new Date()} onChange={changeDue} /></View><View style={s.dateField}><Text style={s.dateFieldLabel}>시간</Text><DateTimePicker value={due} mode="time" display="compact" onChange={changeDue} /></View></View> : <><View style={s.dateRow}><Pressable style={s.dateButton} onPress={() => setMode('date')}><Text>📅 {due.toLocaleDateString('ko-KR')}</Text></Pressable><Pressable style={s.dateButton} onPress={() => setMode('time')}><Text>🕐 {due.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</Text></Pressable></View>{mode && <DateTimePicker value={due} mode={mode} minimumDate={new Date()} onChange={changeDue} />}</>}<Text style={s.hint}>{repeat === 'none' ? '캐릭터가 마감선으로 이동하며 남은 시간을 실시간으로 보여줘요.' : '마감 다음 날 게이지가 초기화되고 다음 반복 기한으로 이동해요.'}</Text><Pressable disabled={invalid} onPress={submit} style={[s.primary, { backgroundColor: category.color }, invalid && s.disabled]}><Text style={s.primaryText}>할 일 추가</Text></Pressable></ScrollView></Sheet>;
 }
 
-function App() {
-  const [categories, setCategories] = useState([]);
-  const [loaded, setLoaded] = useState(false);
-  const [tab, setTab] = useState('main');
-  const [selected, setSelected] = useState(null);
-  const [categoryModal, setCategoryModal] = useState(false);
-  const [todoModal, setTodoModal] = useState(false);
-  const [now, setNow] = useState(new Date());
-
-  useEffect(() => { AsyncStorage.getItem(STORAGE_KEY).then((raw) => { if (raw) setCategories(JSON.parse(raw)); }).catch(() => {}).finally(() => setLoaded(true)); }, []);
-  useEffect(() => { if (loaded) AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(categories)); }, [categories, loaded]);
-  useEffect(() => { const timer = setInterval(() => setNow(new Date()), 30000); return () => clearInterval(timer); }, []);
-
-  const current = categories.find((item) => item.id === selected);
-  const upcoming = useMemo(() => categories.flatMap((category) => category.todos.filter((todo) => !todo.done).map((todo) => ({ category, todo }))).sort((a, b) => new Date(a.todo.dueDate) - new Date(b.todo.dueDate)), [categories]);
-  const updateTodos = (categoryId, change) => setCategories((all) => all.map((category) => category.id === categoryId ? { ...category, todos: change(category.todos) } : category));
-  const addTodo = (categoryId, todo) => updateTodos(categoryId, (todos) => [...todos, todo].sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate)));
-  const toggleTodo = (categoryId, todoId) => updateTodos(categoryId, (todos) => todos.map((todo) => todo.id === todoId ? { ...todo, done: !todo.done } : todo));
-  const deleteTodo = (categoryId, todoId) => Alert.alert('할 일 삭제', '이 할 일을 삭제할까요?', [{ text: '취소' }, { text: '삭제', style: 'destructive', onPress: () => updateTodos(categoryId, (todos) => todos.filter((todo) => todo.id !== todoId)) }]);
-  const deleteCategory = (category) => Alert.alert('카테고리 삭제', `'${category.name}'과 안의 모든 할 일을 삭제할까요?`, [{ text: '취소' }, { text: '삭제', style: 'destructive', onPress: () => { setCategories((all) => all.filter((item) => item.id !== category.id)); setSelected(null); } }]);
-
-  const CategoryCard = ({ category }) => {
-    const next = category.todos.filter((todo) => !todo.done).sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))[0];
-    return (
-      <Pressable onPress={() => setSelected(category.id)} onLongPress={() => deleteCategory(category)} style={styles.card}>
-        <View style={styles.row}><View style={[styles.dot, { backgroundColor: category.color }]} /><Text style={styles.cardTitle}>{category.name}</Text><Text style={styles.count}>{category.todos.filter((todo) => !todo.done).length}개</Text><Text style={styles.chevron}>›</Text></View>
-        {next ? <><View style={styles.metaRow}><Text numberOfLines={1} style={styles.todoPreview}>{next.title}</Text><Text style={[styles.remaining, new Date(next.dueDate) < now && styles.overdue]}>{remaining(next, now)}</Text></View><Gauge value={progress(next, now)} color={category.color} /></> : <Text style={styles.emptyCard}>할 일을 추가해보세요</Text>}
-      </Pressable>
-    );
-  };
-
-  const Main = () => (
-    <View style={styles.screen}>
-      <View style={styles.header}><View><Text style={styles.eyebrow}>DEADLINE GAUGE</Text><Text style={styles.title}>남은 시간</Text></View></View>
-      {categories.length === 0 ? <View style={styles.empty}><Text style={styles.emptyIcon}>◔</Text><Text style={styles.emptyTitle}>첫 카테고리를 만들어보세요</Text><Text style={styles.emptyBody}>과제, 업무, 운동처럼 할 일을 묶고{`\n`}남은 시간을 한눈에 확인할 수 있어요.</Text><Pressable onPress={() => setCategoryModal(true)} style={styles.blackButton}><Text style={styles.primaryButtonText}>카테고리 추가</Text></Pressable></View> : <FlatList data={categories} keyExtractor={(item) => item.id} renderItem={({ item }) => <CategoryCard category={item} />} contentContainerStyle={styles.list} ListFooterComponent={<Pressable onPress={() => setCategoryModal(true)} style={styles.addCard}><Text style={styles.addCardText}>＋  새 카테고리</Text></Pressable>} />}
-    </View>
-  );
-
-  const Detail = () => (
-    <View style={styles.screen}>
-      <View style={styles.detailHeader}><Pressable onPress={() => setSelected(null)} hitSlop={12}><Text style={styles.back}>‹</Text></Pressable><View style={[styles.dot, { backgroundColor: current.color }]} /><Text style={styles.detailTitle}>{current.name}</Text><Pressable onPress={() => deleteCategory(current)}><Text style={styles.delete}>삭제</Text></Pressable></View>
-      {current.todos.length === 0 ? <View style={styles.empty}><Text style={styles.emptyIcon}>✓</Text><Text style={styles.emptyTitle}>할 일이 없어요</Text><Text style={styles.emptyBody}>아래 버튼으로 첫 할 일을 추가하세요.</Text></View> : <FlatList data={current.todos} keyExtractor={(item) => item.id} contentContainerStyle={styles.list} renderItem={({ item }) => <Pressable onLongPress={() => deleteTodo(current.id, item.id)} style={styles.todoCard}><View style={styles.todoTop}><Pressable onPress={() => toggleTodo(current.id, item.id)} style={[styles.checkbox, { borderColor: current.color }, item.done && { backgroundColor: current.color }]}>{item.done && <Text style={styles.check}>✓</Text>}</Pressable><View style={styles.todoText}><View style={styles.metaRow}><Text style={[styles.todoTitle, item.done && styles.done]}>{item.title}</Text><Text style={[styles.remaining, new Date(item.dueDate) < now && !item.done && styles.overdue]}>{remaining(item, now)}</Text></View><Gauge value={item.done ? 1 : progress(item, now)} color={current.color} done={item.done} /><Text style={styles.due}>{dueLabel(item.dueDate)}</Text></View></View></Pressable>} />}
-      <Pressable onPress={() => setTodoModal(true)} style={[styles.floatingButton, { backgroundColor: current.color }]}><Text style={styles.primaryButtonText}>＋  할 일 추가</Text></Pressable>
-    </View>
-  );
-
-  const Calendar = () => (
-    <View style={styles.screen}><View style={styles.header}><View><Text style={styles.eyebrow}>UPCOMING</Text><Text style={styles.title}>캘린더</Text></View></View>{upcoming.length === 0 ? <View style={styles.empty}><Text style={styles.emptyIcon}>▦</Text><Text style={styles.emptyTitle}>예정된 할 일이 없어요</Text></View> : <FlatList data={upcoming} keyExtractor={(item) => item.todo.id} contentContainerStyle={styles.list} renderItem={({ item }) => <View style={styles.calendarRow}><View style={[styles.dot, { backgroundColor: item.category.color }]} /><View style={styles.todoText}><Text style={styles.todoTitle}>{item.todo.title}</Text><Text style={styles.due}>{item.category.name} · {dueLabel(item.todo.dueDate)}</Text></View><Text style={styles.remaining}>{remaining(item.todo, now)}</Text></View>} />}</View>
-  );
-
-  return (
-    <SafeAreaView style={styles.safe}><StatusBar barStyle="dark-content" backgroundColor="#F6F5F1" />{selected && current ? <Detail /> : tab === 'main' ? <Main /> : <Calendar />}{!selected && <View style={styles.tabs}><Pressable onPress={() => setTab('main')} style={styles.tab}><Text style={[styles.tabIcon, tab === 'main' && styles.tabActive]}>⌂</Text><Text style={[styles.tabLabel, tab === 'main' && styles.tabActive]}>메인</Text></Pressable><Pressable onPress={() => setTab('calendar')} style={styles.tab}><Text style={[styles.tabIcon, tab === 'calendar' && styles.tabActive]}>▦</Text><Text style={[styles.tabLabel, tab === 'calendar' && styles.tabActive]}>캘린더</Text></Pressable></View>}<CategorySheet visible={categoryModal} onClose={() => setCategoryModal(false)} onAdd={(category) => setCategories((all) => [...all, category])} /><TodoSheet visible={todoModal} category={current} onClose={() => setTodoModal(false)} onAdd={addTodo} /></SafeAreaView>
-  );
+function EventSheet({ visible, date, onClose, onAdd }) {
+  const [title, setTitle] = useState(''); const [note, setNote] = useState(''); const [emoji, setEmoji] = useState('✨'); const [imageUri, setImageUri] = useState(null);
+  useEffect(() => { if (visible) { setTitle(''); setNote(''); setEmoji('✨'); setImageUri(null); } }, [visible]);
+  const pick = async () => { const p = await ImagePicker.requestMediaLibraryPermissionsAsync(); if (!p.granted) return Alert.alert('사진 권한이 필요해요', '기기 설정에서 사진 접근을 허용해주세요.'); const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, quality: .8 }); if (!r.canceled) setImageUri(r.assets[0].uri); };
+  const submit = () => { if (!title.trim()) return; onAdd({ id: uid(), date, title: title.trim(), note: note.trim(), emoji, imageUri }); onClose(); };
+  return <Sheet visible={visible} title={`${date.replaceAll('-', '.')} 일정`} onClose={onClose} tall><ScrollView keyboardShouldPersistTaps="handled"><Text style={s.label}>이모지</Text><View style={s.choices}>{EMOJIS.map(x => <Pressable key={x} onPress={() => setEmoji(x)} style={[s.choice, emoji === x && s.choiceOn]}><Text style={s.emoji}>{x}</Text></Pressable>)}</View><Text style={s.label}>일정 이름</Text><TextInput value={title} onChangeText={setTitle} placeholder="예: 친구와 전시회" style={s.input} maxLength={50} /><Text style={s.label}>다이어리 메모</Text><TextInput value={note} onChangeText={setNote} placeholder="오늘의 기록을 남겨보세요" style={[s.input, s.note]} multiline maxLength={300} /><Pressable onPress={pick} style={s.photo}>{imageUri ? <Image source={{ uri: imageUri }} style={s.photoImage} /> : <><Text style={s.photoIcon}>▧</Text><Text style={s.photoText}>갤러리에서 사진 첨부</Text></>}</Pressable><Pressable disabled={!title.trim()} onPress={submit} style={[s.primary, s.black, !title.trim() && s.disabled]}><Text style={s.primaryText}>일정 저장</Text></Pressable></ScrollView></Sheet>;
 }
 
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#F6F5F1' }, screen: { flex: 1 }, header: { paddingHorizontal: 22, paddingTop: 22, paddingBottom: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, eyebrow: { fontSize: 11, letterSpacing: 2, color: '#8A8984', fontWeight: '700' }, title: { fontSize: 34, lineHeight: 43, fontWeight: '800', color: '#191918' }, headerPlus: { width: 46, height: 46, borderRadius: 23, backgroundColor: '#191918', alignItems: 'center', justifyContent: 'center' }, headerPlusText: { color: 'white', fontSize: 29, marginTop: -3 }, list: { padding: 16, paddingBottom: 110, gap: 12 }, card: { backgroundColor: 'white', padding: 19, borderRadius: 22, borderWidth: 1, borderColor: '#E7E5DF', gap: 13, shadowColor: '#000', shadowOpacity: .05, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 2 }, row: { flexDirection: 'row', alignItems: 'center', gap: 10 }, dot: { width: 11, height: 11, borderRadius: 6 }, cardTitle: { fontSize: 19, fontWeight: '750', flex: 1, color: '#222' }, count: { color: '#8A8984', fontSize: 13 }, chevron: { color: '#AAA9A4', fontSize: 28, marginLeft: 2 }, metaRow: { flexDirection: 'row', alignItems: 'center', gap: 10 }, todoPreview: { flex: 1, fontSize: 14, color: '#343432', fontWeight: '600' }, remaining: { color: '#777671', fontSize: 12, fontWeight: '700' }, overdue: { color: '#D13C3C' }, gaugeTrack: { height: 11, borderRadius: 8, overflow: 'hidden' }, gaugeFill: { height: '100%', borderRadius: 8 }, emptyCard: { color: '#8A8984' }, addCard: { height: 72, borderRadius: 20, borderWidth: 1.5, borderColor: '#C8C6C0', borderStyle: 'dashed', alignItems: 'center', justifyContent: 'center', marginTop: 2 }, addCardText: { color: '#777671', fontWeight: '700', fontSize: 15 }, empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 28, marginBottom: 60 }, emptyIcon: { fontSize: 58, color: '#777671', marginBottom: 13 }, emptyTitle: { fontSize: 20, fontWeight: '800', color: '#272725' }, emptyBody: { color: '#777671', textAlign: 'center', lineHeight: 21, marginTop: 9 }, blackButton: { backgroundColor: '#191918', paddingHorizontal: 22, paddingVertical: 14, borderRadius: 15, marginTop: 22 }, tabs: { height: 76, flexDirection: 'row', borderTopWidth: 1, borderColor: '#E1DFD9', backgroundColor: '#FBFAF7', paddingBottom: 8 }, tab: { flex: 1, alignItems: 'center', justifyContent: 'center' }, tabIcon: { fontSize: 23, color: '#A3A19B' }, tabLabel: { fontSize: 11, fontWeight: '600', color: '#A3A19B', marginTop: 2 }, tabActive: { color: '#191918' }, modalBackdrop: { flex: 1, backgroundColor: '#0006', justifyContent: 'flex-end' }, sheet: { backgroundColor: '#FBFAF7', borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 22, paddingBottom: 34, minHeight: 390 }, sheetHandle: { width: 42, height: 5, borderRadius: 3, backgroundColor: '#D2D0CA', alignSelf: 'center', marginTop: 9 }, sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 18 }, sheetTitle: { fontSize: 21, fontWeight: '800' }, close: { fontSize: 30, color: '#777671' }, label: { fontSize: 13, fontWeight: '700', color: '#6E6D68', marginBottom: 8, marginTop: 7 }, input: { height: 52, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: '#E1DFD9', paddingHorizontal: 15, fontSize: 16, marginBottom: 14 }, palette: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 22 }, swatch: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' }, swatchSelected: { borderWidth: 3, borderColor: 'white', outlineWidth: 2, outlineColor: '#AAA' }, check: { color: 'white', fontWeight: '900' }, primaryButton: { paddingVertical: 16, borderRadius: 15, alignItems: 'center', marginTop: 4 }, primaryButtonText: { color: 'white', fontSize: 16, fontWeight: '800' }, disabled: { opacity: .35 }, dateButtons: { flexDirection: 'row', gap: 10, marginBottom: 10 }, dateButton: { flex: 1, paddingVertical: 15, paddingHorizontal: 10, backgroundColor: 'white', borderWidth: 1, borderColor: '#E1DFD9', borderRadius: 14, alignItems: 'center' }, hint: { color: '#777671', fontSize: 12, marginVertical: 13 }, detailHeader: { height: 72, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: 1, borderColor: '#E5E3DE' }, back: { fontSize: 42, color: '#292927', marginTop: -6 }, detailTitle: { fontSize: 23, fontWeight: '800', flex: 1 }, delete: { color: '#D13C3C', fontWeight: '600' }, todoCard: { backgroundColor: 'white', borderRadius: 20, padding: 17, borderWidth: 1, borderColor: '#E7E5DF' }, todoTop: { flexDirection: 'row', gap: 12 }, checkbox: { width: 25, height: 25, borderRadius: 13, borderWidth: 2, alignItems: 'center', justifyContent: 'center' }, todoText: { flex: 1, gap: 8 }, todoTitle: { fontSize: 16, fontWeight: '700', color: '#292927', flex: 1 }, done: { textDecorationLine: 'line-through', color: '#999791' }, due: { fontSize: 12, color: '#8A8984' }, floatingButton: { position: 'absolute', left: 18, right: 18, bottom: 20, borderRadius: 17, paddingVertical: 17, alignItems: 'center', shadowColor: '#000', shadowOpacity: .18, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 4 }, calendarRow: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: 'white', padding: 17, borderRadius: 18, borderWidth: 1, borderColor: '#E7E5DF' },
+export default function App() {
+  const [categories, setCategories] = useState([]); const [events, setEvents] = useState([]); const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState('todo'); const [categoryId, setCategoryId] = useState(null); const [categoryOpen, setCategoryOpen] = useState(false); const [todoOpen, setTodoOpen] = useState(false); const [eventOpen, setEventOpen] = useState(false);
+  const [now, setNow] = useState(new Date()); const [month, setMonth] = useState(new Date(new Date().getFullYear(), new Date().getMonth(), 1)); const [selectedDate, setSelectedDate] = useState(keyOf(new Date()));
+  useEffect(() => { (async () => { try { const raw = await AsyncStorage.getItem(STORE); const previous = raw || await AsyncStorage.getItem(PREVIOUS_STORE); if (previous) { const data = JSON.parse(previous); setCategories(data.categories || []); setEvents(data.events || []); } else { const old = await AsyncStorage.getItem(OLD_STORE); if (old) setCategories(JSON.parse(old)); } } catch (_) { Alert.alert('저장 데이터를 불러오지 못했어요.'); } finally { setLoaded(true); } })(); }, []);
+  useEffect(() => { if (loaded) AsyncStorage.setItem(STORE, JSON.stringify({ categories, events })).catch(() => {}); }, [categories, events, loaded]);
+  useEffect(() => { const timer = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(timer); }, []);
+  useEffect(() => {
+    if (!loaded) return;
+    setCategories(all => {
+      let changed = false;
+      const nextCategories = all.map(category => ({ ...category, todos: category.todos.map(todo => {
+        if (!todo.repeat || todo.repeat === 'none' || keyOf(now) <= keyOf(todo.dueDate)) return todo;
+        const nextDue = advanceDueDate(todo, now);
+        if (!nextDue) return todo;
+        changed = true;
+        const cycleStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        return { ...todo, dueDate: nextDue.toISOString(), createdAt: cycleStart.toISOString(), done: false };
+      }) }));
+      return changed ? nextCategories : all;
+    });
+  }, [now, loaded]);
+  const current = categories.find(x => x.id === categoryId);
+  const allTodos = useMemo(() => categories.flatMap(category => category.todos.map(todo => ({ category, todo }))), [categories]);
+  const updateTodos = (id, fn) => setCategories(all => all.map(c => c.id === id ? { ...c, todos: fn(c.todos) } : c));
+  const addTodo = (id, todo) => updateTodos(id, todos => [...todos, todo].sort((a, b) => +new Date(a.dueDate) - +new Date(b.dueDate)));
+  const removeTodo = (id, todoId) => Alert.alert('할 일 삭제', '이 할 일을 삭제할까요?', [{ text: '취소' }, { text: '삭제', style: 'destructive', onPress: () => updateTodos(id, xs => xs.filter(x => x.id !== todoId)) }]);
+  const removeCategory = c => Alert.alert('카테고리 삭제', `'${c.name}'과 모든 할 일을 삭제할까요?`, [{ text: '취소' }, { text: '삭제', style: 'destructive', onPress: () => { setCategories(xs => xs.filter(x => x.id !== c.id)); setCategoryId(null); } }]);
+  const removeEvent = e => Alert.alert('일정 삭제', `'${e.title}' 일정을 삭제할까요?`, [{ text: '취소' }, { text: '삭제', style: 'destructive', onPress: () => setEvents(xs => xs.filter(x => x.id !== e.id)) }]);
+  const cells = useMemo(() => { const y = month.getFullYear(), m = month.getMonth(), start = new Date(y, m, 1 - new Date(y, m, 1).getDay()); return Array.from({ length: 42 }, (_, i) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + i)); }, [month]);
+
+  const CategoryCard = ({ category }) => { const active = category.todos.filter(x => !x.done).sort((a, b) => +new Date(a.dueDate) - +new Date(b.dueDate)); return <Pressable onPress={() => setCategoryId(category.id)} onLongPress={() => removeCategory(category)} style={s.card}><View style={s.row}><View style={[s.badge, { backgroundColor: `${category.color}20` }]}><Text>▤</Text></View><Text style={s.cardTitle}>{category.name}</Text><Text style={s.count}>{active.length}개</Text><Text style={s.chevron}>›</Text></View>{active.length ? active.slice(0, 3).map(todo => <View key={todo.id} style={s.preview}><View style={s.meta}><Text numberOfLines={1} style={s.previewTitle}>{todo.title}</Text><Text style={[s.remaining, new Date(todo.dueDate) < now && s.overdue]}>{remaining(todo, now)}</Text></View><Gauge todo={todo} color={category.color} now={now} /></View>) : <Text style={s.muted}>할 일을 추가해보세요</Text>}{active.length > 3 && <Text style={s.more}>+ {active.length - 3}개 더 보기</Text>}</Pressable>; };
+
+  const TodoHome = () => <View style={s.screen}><View style={s.header}><View><Text style={s.eyebrow}>HOURGLASS</Text><Text style={s.title}>모래시계</Text><Text style={s.subtitle}>진행 중인 할 일 {allTodos.filter(x => !x.todo.done).length}개</Text></View><Pressable onPress={() => setCategoryOpen(true)} style={s.plus}><Text style={s.plusText}>＋</Text></Pressable></View>{categories.length ? <FlatList data={categories} keyExtractor={x => x.id} renderItem={({ item }) => <CategoryCard category={item} />} contentContainerStyle={s.list} ListFooterComponent={<Pressable onPress={() => setCategoryOpen(true)} style={s.addCard}><Text style={s.addText}>＋ 새 카테고리</Text></Pressable>} /> : <View style={s.empty}><Text style={s.emptyIcon}>◔</Text><Text style={s.emptyTitle}>첫 카테고리를 만들어보세요</Text><Text style={s.emptyBody}>과제, 업무, 운동처럼 할 일을 묶고{`\n`}남은 시간을 한눈에 확인할 수 있어요.</Text><Pressable onPress={() => setCategoryOpen(true)} style={[s.primary, s.black]}><Text style={s.primaryText}>카테고리 추가</Text></Pressable></View>}</View>;
+
+  const Detail = () => <View style={s.screen}><View style={s.detailHead}><Pressable onPress={() => setCategoryId(null)}><Text style={s.back}>‹</Text></Pressable><View style={[s.badge, { backgroundColor: `${current.color}20` }]}><Text>▤</Text></View><Text style={s.detailTitle}>{current.name}</Text><Pressable onPress={() => removeCategory(current)}><Text style={s.delete}>삭제</Text></Pressable></View>{current.todos.length ? <FlatList data={current.todos} keyExtractor={x => x.id} contentContainerStyle={s.list} renderItem={({ item }) => <Pressable onLongPress={() => removeTodo(current.id, item.id)} style={s.todoCard}><View style={s.todoRow}><Pressable onPress={() => updateTodos(current.id, xs => xs.map(x => x.id === item.id ? { ...x, done: !x.done } : x))} style={[s.checkbox, { borderColor: current.color }, item.done && { backgroundColor: current.color }]}>{item.done && <Text style={s.check}>✓</Text>}</Pressable><View style={s.flex}><View style={s.meta}><Text style={[s.todoTitle, item.done && s.done]}>{item.title}</Text><Text style={[s.remaining, new Date(item.dueDate) < now && !item.done && s.overdue]}>{remaining(item, now)}</Text></View><Gauge todo={item} color={current.color} now={now} /><Text style={s.due}>마감 {dueText(item.dueDate)}</Text></View></View></Pressable>} /> : <View style={s.empty}><Text style={s.emptyIcon}>✓</Text><Text style={s.emptyTitle}>할 일이 없어요</Text><Text style={s.emptyBody}>아래 버튼으로 첫 할 일을 추가하세요.</Text></View>}<Pressable onPress={() => setTodoOpen(true)} style={[s.floating, { backgroundColor: current.color }]}><Text style={s.primaryText}>＋ 할 일 추가</Text></Pressable></View>;
+
+  const Calendar = () => <View style={s.screen}><ScrollView contentContainerStyle={s.calendarContent}><View style={s.calendarHead}><View><Text style={s.eyebrow}>MY CALENDAR</Text><Text style={s.title}>캘린더</Text></View><Pressable onPress={() => setEventOpen(true)} style={s.plus}><Text style={s.plusText}>＋</Text></Pressable></View><View style={s.calendarCard}><View style={s.monthNav}><Pressable onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}><Text style={s.arrow}>‹</Text></Pressable><Text style={s.monthTitle}>{month.getFullYear()}년 {month.getMonth() + 1}월</Text><Pressable onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}><Text style={s.arrow}>›</Text></Pressable></View><View style={s.week}>{WEEK.map((x, i) => <Text key={x} style={[s.weekday, i === 0 && s.red, i === 6 && s.blue]}>{x}</Text>)}</View><View style={s.grid}>{cells.map((date, i) => { if (!date) return <View key={`x${i}`} style={s.day} />; const key = keyOf(date), selected = key === selectedDate, todos = allTodos.filter(x => keyOf(x.todo.dueDate) === key), dayEvents = events.filter(x => x.date === key); return <Pressable key={key} onPress={() => setSelectedDate(key)} style={[s.day, selected && s.dayOn]}><Text style={[s.dayText, date.getDay() === 0 && s.red, date.getDay() === 6 && s.blue, selected && s.dayTextOn, key === keyOf(now) && !selected && s.today]}>{date.getDate()}</Text><View style={s.marks}>{todos.slice(0, 2).map(x => <View key={x.todo.id} style={[s.mark, { backgroundColor: x.category.color }]} />)}{dayEvents[0] && <Text style={s.tinyEmoji}>{dayEvents[0].emoji}</Text>}</View></Pressable>; })}</View></View><View style={s.selectedHead}><View><Text style={s.selectedTitle}>{new Intl.DateTimeFormat('ko-KR', { month: 'long', day: 'numeric', weekday: 'long' }).format(fromKey(selectedDate))}</Text><Text style={s.subtitle}>할 일 {chosenTodos.length} · 일정 {chosenEvents.length}</Text></View><Pressable onPress={() => setEventOpen(true)} style={s.smallButton}><Text style={s.smallText}>일정 추가</Text></Pressable></View>{chosenTodos.map(({ category, todo }) => <Pressable key={todo.id} onPress={() => { setCategoryId(category.id); setTab('todo'); }} style={s.dayItem}><View style={[s.itemIcon, { backgroundColor: `${category.color}20` }]}><Text>{todo.character || '🏃'}</Text></View><View style={s.flex}><Text style={s.type}>{category.name} · 마감</Text><Text style={[s.todoTitle, todo.done && s.done]}>{todo.title}</Text><Gauge todo={todo} color={category.color} now={now} /></View></Pressable>)}{chosenEvents.map(event => <Pressable key={event.id} onLongPress={() => removeEvent(event)} style={s.eventCard}>{event.imageUri && <Image source={{ uri: event.imageUri }} style={s.eventImage} />}<View style={s.eventBody}><Text style={s.eventEmoji}>{event.emoji}</Text><View style={s.flex}><Text style={s.type}>나의 일정</Text><Text style={s.todoTitle}>{event.title}</Text>{!!event.note && <Text style={s.eventNote}>{event.note}</Text>}</View></View></Pressable>)}{!chosenTodos.length && !chosenEvents.length && <View style={s.dayEmpty}><Text style={s.dayEmptyEmoji}>🌿</Text><Text style={s.emptyTitle}>여유로운 하루예요</Text><Text style={s.emptyBody}>일정이나 기록을 남겨보세요.</Text></View>}</ScrollView></View>;
+
+  const CalendarFull = () => <View style={s.screen}><ScrollView contentContainerStyle={s.calendarFullContent}><View style={s.calendarHead}><View><Text style={s.eyebrow}>MY CALENDAR</Text><Text style={s.title}>캘린더</Text></View><Pressable onPress={() => setEventOpen(true)} style={s.plus}><Text style={s.plusText}>＋</Text></Pressable></View><View style={s.calendarCard}><View style={s.monthNav}><Pressable onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}><Text style={s.arrow}>‹</Text></Pressable><Text style={s.monthTitle}>{month.getFullYear()}년 {month.getMonth() + 1}월</Text><Pressable onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}><Text style={s.arrow}>›</Text></Pressable></View><View style={s.week}>{WEEK.map((x, i) => <Text key={x} style={[s.weekday, i === 0 && s.red, i === 6 && s.blue]}>{x}</Text>)}</View><View style={s.grid}>{cells.map(date => { const key = keyOf(date); const selected = key === selectedDate; const inMonth = date.getMonth() === month.getMonth(); const todos = allTodos.filter(x => keyOf(x.todo.dueDate) === key); const dayEvents = events.filter(x => x.date === key); const entries = [...todos.map(x => ({ id: x.todo.id, title: `${x.todo.character || '🏃'} ${x.todo.title}`, color: x.category.color })), ...dayEvents.map(x => ({ id: x.id, title: `${x.emoji} ${x.title}`, color: '#E9B949' }))]; return <Pressable key={key} onPress={() => setSelectedDate(key)} style={[s.calendarDay, selected && s.calendarDayOn, !inMonth && s.otherMonth]}><Text style={[s.dayText, date.getDay() === 0 && s.red, date.getDay() === 6 && s.blue, key === keyOf(now) && s.today]}>{date.getDate()}</Text><View style={s.cellEntries}>{entries.slice(0, 3).map(entry => <View key={entry.id} style={[s.cellEntry, { backgroundColor: `${entry.color}22`, borderLeftColor: entry.color }]}><Text numberOfLines={1} style={s.cellEntryText}>{entry.title}</Text></View>)}{entries.length > 3 && <Text style={s.cellMore}>+{entries.length - 3}</Text>}</View></Pressable>; })}</View></View><Text style={s.calendarHelp}>날짜를 선택한 뒤 ＋ 버튼으로 일정을 추가할 수 있어요.</Text></ScrollView></View>;
+
+  return <SafeAreaView style={s.safe}><StatusBar barStyle="dark-content" backgroundColor="#F7F6F2" />{categoryId && current ? <Detail /> : tab === 'todo' ? <TodoHome /> : <CalendarFull />}{!categoryId && <View style={s.tabs}><Pressable onPress={() => setTab('todo')} style={s.tab}><Text style={[s.tabIcon, tab === 'todo' && s.active]}>⌂</Text><Text style={[s.tabLabel, tab === 'todo' && s.active]}>투두</Text></Pressable><Pressable onPress={() => setTab('calendar')} style={s.tab}><Text style={[s.tabIcon, tab === 'calendar' && s.active]}>▦</Text><Text style={[s.tabLabel, tab === 'calendar' && s.active]}>캘린더</Text></Pressable></View>}<CategorySheet visible={categoryOpen} onClose={() => setCategoryOpen(false)} onAdd={x => setCategories(all => [...all, x])} /><TodoSheet visible={todoOpen} category={current} onClose={() => setTodoOpen(false)} onAdd={addTodo} /><EventSheet visible={eventOpen} date={selectedDate} onClose={() => setEventOpen(false)} onAdd={x => setEvents(all => [...all, x])} /></SafeAreaView>;
+}
+
+const s = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: '#F7F6F2' }, screen: { flex: 1 }, flex: { flex: 1, gap: 5 }, header: { padding: 22, paddingBottom: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, calendarHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }, eyebrow: { fontSize: 11, letterSpacing: 2, color: '#918F89', fontWeight: '700' }, title: { fontSize: 34, lineHeight: 42, fontWeight: '800', color: '#1D1D1B' }, subtitle: { color: '#888680', marginTop: 2, fontSize: 12 }, plus: { width: 46, height: 46, borderRadius: 23, backgroundColor: '#1D1D1B', alignItems: 'center', justifyContent: 'center' }, plusText: { color: 'white', fontSize: 27 },
+  list: { padding: 16, paddingBottom: 110, gap: 12 }, card: { backgroundColor: 'white', padding: 18, borderRadius: 23, borderWidth: 1, borderColor: '#E8E6DF', gap: 12, shadowColor: '#000', shadowOpacity: .045, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 2 }, row: { flexDirection: 'row', alignItems: 'center', gap: 10 }, badge: { width: 34, height: 34, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, cardTitle: { fontSize: 19, fontWeight: '700', flex: 1 }, count: { color: '#918F89', fontSize: 13 }, chevron: { color: '#AAA9A4', fontSize: 28 }, preview: { gap: 6 }, meta: { flexDirection: 'row', alignItems: 'center', gap: 10 }, previewTitle: { flex: 1, fontSize: 14, fontWeight: '600' }, remaining: { color: '#777671', fontSize: 11, fontWeight: '700' }, overdue: { color: '#D13C3C' }, more: { fontSize: 12, color: '#8A8984' }, muted: { color: '#8A8984' },
+  gaugeWrap: { height: 21, justifyContent: 'center' }, gauge: { height: 8, borderRadius: 8, overflow: 'hidden' }, gaugeFill: { height: '100%', borderRadius: 8 }, runner: { position: 'absolute', width: 24, marginLeft: -12, textAlign: 'center', fontSize: 15, top: -3 }, addCard: { height: 70, borderRadius: 20, borderWidth: 1.5, borderColor: '#C8C6C0', borderStyle: 'dashed', alignItems: 'center', justifyContent: 'center' }, addText: { color: '#777671', fontWeight: '700' },
+  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 28, marginBottom: 55 }, emptyIcon: { fontSize: 58, color: '#777671', marginBottom: 12 }, emptyTitle: { fontSize: 20, fontWeight: '800', color: '#272725' }, emptyBody: { color: '#777671', textAlign: 'center', lineHeight: 21, marginTop: 8 }, primary: { paddingVertical: 16, borderRadius: 15, alignItems: 'center', marginTop: 8 }, black: { backgroundColor: '#1D1D1B', paddingHorizontal: 22 }, primaryText: { color: 'white', fontSize: 16, fontWeight: '800' }, disabled: { opacity: .35 },
+  tabs: { height: 76, flexDirection: 'row', borderTopWidth: 1, borderColor: '#E1DFD9', backgroundColor: '#FBFAF7', paddingBottom: 8 }, tab: { flex: 1, alignItems: 'center', justifyContent: 'center' }, tabIcon: { fontSize: 23, color: '#A3A19B' }, tabLabel: { fontSize: 11, fontWeight: '600', color: '#A3A19B' }, active: { color: '#191918' },
+  backdrop: { flex: 1, backgroundColor: '#0006', justifyContent: 'flex-end' }, sheet: { backgroundColor: '#FBFAF7', borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 22, paddingBottom: 34, minHeight: 390, maxHeight: '88%' }, tall: { minHeight: 540 }, handle: { width: 42, height: 5, borderRadius: 3, backgroundColor: '#D2D0CA', alignSelf: 'center', marginTop: 9 }, sheetHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 18 }, sheetTitle: { fontSize: 21, fontWeight: '800' }, close: { fontSize: 30, color: '#777671' }, label: { fontSize: 13, fontWeight: '700', color: '#6E6D68', marginBottom: 8, marginTop: 7 }, input: { minHeight: 52, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: '#E1DFD9', paddingHorizontal: 15, fontSize: 16, marginBottom: 14 }, note: { height: 86, paddingTop: 13, textAlignVertical: 'top' }, choices: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 13 }, choice: { width: 48, height: 44, borderRadius: 13, backgroundColor: 'white', borderWidth: 1, borderColor: '#E4E2DC', alignItems: 'center', justifyContent: 'center' }, choiceOn: { borderColor: '#1D1D1B', backgroundColor: '#F0EEE8' }, emoji: { fontSize: 23 }, colors: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 18 }, swatch: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' }, swatchOn: { borderWidth: 3, borderColor: 'white' }, check: { color: 'white', fontWeight: '900' }, dateRow: { flexDirection: 'row', gap: 10 }, dateField: { flex: 1, minHeight: 64, padding: 8, backgroundColor: 'white', borderWidth: 1, borderColor: '#E1DFD9', borderRadius: 14, alignItems: 'center' }, dateFieldLabel: { color: '#777671', fontSize: 11, fontWeight: '700', marginBottom: 2 }, dateButton: { flex: 1, paddingVertical: 15, backgroundColor: 'white', borderWidth: 1, borderColor: '#E1DFD9', borderRadius: 14, alignItems: 'center' }, hint: { color: '#777671', fontSize: 12, marginVertical: 13 }, photo: { height: 110, borderRadius: 16, borderWidth: 1.5, borderStyle: 'dashed', borderColor: '#C8C6C0', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }, photoImage: { width: '100%', height: '100%' }, photoIcon: { fontSize: 26, color: '#777671' }, photoText: { color: '#777671', fontWeight: '600' },
+  detailHead: { minHeight: 72, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: 1, borderColor: '#E5E3DE' }, back: { fontSize: 42, color: '#292927' }, detailTitle: { fontSize: 23, fontWeight: '800', flex: 1 }, delete: { color: '#D13C3C', fontWeight: '600' }, todoCard: { backgroundColor: 'white', borderRadius: 20, padding: 17, borderWidth: 1, borderColor: '#E7E5DF' }, todoRow: { flexDirection: 'row', gap: 12 }, checkbox: { width: 25, height: 25, borderRadius: 13, borderWidth: 2, alignItems: 'center', justifyContent: 'center' }, todoTitle: { fontSize: 16, fontWeight: '700', color: '#292927', flex: 1 }, done: { textDecorationLine: 'line-through', color: '#999791' }, due: { fontSize: 12, color: '#8A8984' }, floating: { position: 'absolute', left: 18, right: 18, bottom: 20, borderRadius: 17, paddingVertical: 17, alignItems: 'center' },
+  calendarContent: { padding: 18, paddingBottom: 40, gap: 14 }, calendarCard: { backgroundColor: 'white', borderRadius: 24, padding: 14, borderWidth: 1, borderColor: '#E8E6DF' }, monthNav: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 7 }, arrow: { fontSize: 32, color: '#55534E' }, monthTitle: { fontSize: 18, fontWeight: '800' }, week: { flexDirection: 'row' }, weekday: { width: '14.285%', textAlign: 'center', color: '#777671', fontSize: 12, fontWeight: '700', paddingVertical: 8 }, red: { color: '#E05757' }, blue: { color: '#4C83CB' }, grid: { flexDirection: 'row', flexWrap: 'wrap' }, day: { width: '14.285%', height: 54, alignItems: 'center', paddingTop: 5, borderRadius: 13 }, dayOn: { backgroundColor: '#1D1D1B' }, dayText: { fontSize: 13, fontWeight: '600' }, dayTextOn: { color: 'white' }, today: { borderBottomWidth: 2, borderBottomColor: '#1D1D1B' }, marks: { flexDirection: 'row', alignItems: 'center', gap: 2, marginTop: 6 }, mark: { width: 5, height: 5, borderRadius: 3 }, tinyEmoji: { fontSize: 10 }, selectedHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 5 }, selectedTitle: { fontSize: 20, fontWeight: '800' }, smallButton: { backgroundColor: '#E9E7E0', paddingHorizontal: 13, paddingVertical: 9, borderRadius: 12 }, smallText: { fontSize: 12, fontWeight: '700' }, dayItem: { flexDirection: 'row', gap: 11, backgroundColor: 'white', borderRadius: 18, padding: 15, borderWidth: 1, borderColor: '#E8E6DF' }, itemIcon: { width: 38, height: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center' }, type: { fontSize: 10, color: '#8A8984', fontWeight: '700' }, eventCard: { backgroundColor: 'white', borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: '#E8E6DF' }, eventImage: { width: '100%', height: 150 }, eventBody: { flexDirection: 'row', gap: 11, padding: 15 }, eventEmoji: { fontSize: 29 }, eventNote: { color: '#777671', fontSize: 13, lineHeight: 19 }, dayEmpty: { alignItems: 'center', paddingVertical: 36 }, dayEmptyEmoji: { fontSize: 42, marginBottom: 8 },
+  repeatRow: { gap: 7, paddingBottom: 5 }, repeatChip: { paddingHorizontal: 13, paddingVertical: 9, borderRadius: 18, backgroundColor: 'white', borderWidth: 1, borderColor: '#DDDAD3' }, repeatText: { color: '#5F5D58', fontSize: 12, fontWeight: '700' }, repeatTextOn: { color: 'white' }, dayChoices: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, marginBottom: 4 }, dayChoice: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: 'white', borderWidth: 1, borderColor: '#DDDAD3' }, dayChoiceText: { color: '#5F5D58', fontWeight: '700' },
+  calendarFullContent: { padding: 14, paddingBottom: 20 }, calendarDay: { width: '14.285%', height: 78, paddingHorizontal: 2, paddingTop: 4, borderRadius: 9, borderWidth: 1, borderColor: 'transparent' }, calendarDayOn: { borderColor: '#1D1D1B', backgroundColor: '#F1F0EB' }, otherMonth: { opacity: .3 }, cellEntries: { gap: 2, marginTop: 4 }, cellEntry: { minHeight: 15, borderLeftWidth: 2, borderRadius: 2, paddingHorizontal: 2, justifyContent: 'center' }, cellEntryText: { fontSize: 8, color: '#383733', fontWeight: '600' }, cellMore: { fontSize: 8, color: '#777671', textAlign: 'right' }, calendarHelp: { textAlign: 'center', color: '#8A8984', fontSize: 11, marginTop: 10 },
 });
-
-export default App;
