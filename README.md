@@ -8,21 +8,20 @@ Windows에서 개발하고 iPhone의 Expo Go로 테스트할 수 있는 React Na
 - iPhone App Store에서 **Expo Go** 설치
 - PC와 iPhone을 같은 Wi-Fi에 연결
 
-## 2. 실행
+## 2. QR 코드로 실행
 
-PowerShell에서 이 폴더로 이동한 다음 실행합니다.
+`Hourglass-Expo` 폴더에서 PowerShell 또는 터미널을 연 다음 아래 명령을 실행합니다.
 
 ```powershell
-npm install
-npx expo start
+.\node_modules\.bin\expo.cmd start
 ```
 
-터미널 또는 브라우저에 나타난 QR 코드를 iPhone 기본 카메라로 스캔하고 Expo Go로 엽니다.
+터미널에 나타난 QR 코드를 iPhone 기본 카메라로 스캔하고 `Expo Go에서 열기`를 누릅니다. 앱을 종료할 때는 터미널에서 `Ctrl + C`를 누릅니다.
 
-같은 Wi-Fi에서 연결되지 않으면 다음 명령을 사용합니다.
+> 처음 실행하거나 `node_modules` 폴더가 없는 경우에만 아래 명령으로 패키지를 설치합니다.
 
 ```powershell
-npx expo start --tunnel
+npm.cmd install
 ```
 
 ## 조작
